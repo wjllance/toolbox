@@ -36,11 +36,18 @@ function switchClient() {
 }
 
 // =============== 合约 ABI ===============
-const UNISWAP_V3_ABI = parseAbi([
-  "event Burn(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)",
-  "event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)",
+const UNISWAP_V3_POOL_ABI = parseAbi([
+  "event Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
+  "event Collect(address indexed owner, address recipient, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount0, uint128 amount1)",
+  "event Mint(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
-  "event Mint(address indexed sender, address indexed owner, int24 indexed tickLower, int24 tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
+]);
+
+const POSITION_MANAGER_ABI = parseAbi([
+  "event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)",
+  "event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)",
+  "event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)",
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
 ]);
 
 const ERC20_ABI = parseAbi([
@@ -135,8 +142,6 @@ async function getTokenInfo(address) {
 // =============== 主函数 ===============
 async function analyzeTransaction(txHash) {
   console.log(`\n📝 开始分析交易: ${txHash}`);
-  console.log("⏳ 获取交易收据...");
-
   const receipt = await withRetry(() =>
     getCurrentClient().getTransactionReceipt({ hash: txHash })
   );
@@ -145,111 +150,241 @@ async function analyzeTransaction(txHash) {
   let poolAddress = null;
   let token0 = null;
   let token1 = null;
-  let events = [];
+  let events = {
+    pool: [],
+    position: [],
+  };
 
-  console.log(`\n🔍 开始分析 ${receipt.logs.length} 条日志...`);
-
-  // 定义 Uniswap V3 事件的 topic hash
-  const UNISWAP_V3_EVENT_TOPICS = [
+  // 定义事件的 topic hash
+  const POOL_EVENT_TOPICS = [
     "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c", // Burn
-    "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01", // Collect
-    "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67", // Swap
+    "0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0", // Collect
     "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde", // Mint
+    "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67", // Swap
   ];
 
-  // 自动识别所有 Uniswap V3 池子地址
-  const poolAddresses = new Set();
-  for (const log of receipt.logs) {
-    if (UNISWAP_V3_EVENT_TOPICS.includes(log.topics[0])) {
-      poolAddresses.add(log.address.toLowerCase());
-    }
-  }
-
-  console.log("\n🏊 发现的 Uniswap V3 池子地址：");
-  Array.from(poolAddresses).forEach((addr, i) => {
-    console.log(`  ${i + 1}. ${addr}`);
-  });
+  const POSITION_EVENT_TOPICS = [
+    "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f", // IncreaseLiquidity
+    "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4", // DecreaseLiquidity
+    "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01", // Collect
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", // Transfer
+  ];
 
   // 处理所有日志
   for (const log of receipt.logs) {
-    // 只处理 Uniswap V3 池子的 log
-    if (!poolAddresses.has(log.address.toLowerCase())) {
-      continue;
-    }
-
-    console.log(`\n[PoolLog] 处理池子 ${log.address} 的事件`);
-    console.log(`  Topic0: ${log.topics[0]}`);
-
     try {
-      const parsed = decodeEventLog({
-        abi: UNISWAP_V3_ABI,
-        data: log.data,
-        topics: log.topics,
-      });
+      if (POOL_EVENT_TOPICS.includes(log.topics[0])) {
+        const parsed = decodeEventLog({
+          abi: UNISWAP_V3_POOL_ABI,
+          data: log.data,
+          topics: log.topics,
+        });
+        events.pool.push({ log, parsed });
 
-      if (parsed.eventName === "Swap" && !poolAddress) {
-        poolAddress = log.address;
-        console.log("\n🏊 发现 Uniswap V3 池子地址...");
-        console.log(`📍 池子地址: ${poolAddress}`);
+        if (!poolAddress) {
+          poolAddress = log.address;
+          console.log(`\n📍 分析池子: ${poolAddress}`);
 
-        console.log("⏳ 获取代币地址...");
-        const [token0Address, token1Address] = await Promise.all([
-          withRetry(() =>
-            getCurrentClient().readContract({
-              abi: POOL_ABI,
-              address: poolAddress,
-              functionName: "token0",
-            })
-          ),
-          withRetry(() =>
-            getCurrentClient().readContract({
-              abi: POOL_ABI,
-              address: poolAddress,
-              functionName: "token1",
-            })
-          ),
-        ]);
+          const [token0Address, token1Address] = await Promise.all([
+            withRetry(() =>
+              getCurrentClient().readContract({
+                abi: POOL_ABI,
+                address: poolAddress,
+                functionName: "token0",
+              })
+            ),
+            withRetry(() =>
+              getCurrentClient().readContract({
+                abi: POOL_ABI,
+                address: poolAddress,
+                functionName: "token1",
+              })
+            ),
+          ]);
 
-        console.log(`✅ Token0 地址: ${token0Address}`);
-        console.log(`✅ Token1 地址: ${token1Address}`);
+          token0 = await getTokenInfo(token0Address);
+          token1 = await getTokenInfo(token1Address);
 
-        console.log("\n⏳ 获取代币信息...");
-        token0 = await getTokenInfo(token0Address);
-        token1 = await getTokenInfo(token1Address);
-
-        if (token0 && token1) {
-          console.log("\n📊 池子信息:");
-          console.log(`  Pool: ${poolAddress}`);
-          console.log(
-            `  Token0: ${token0.symbol} (${token0.decimals} decimals)`
-          );
-          console.log(
-            `  Token1: ${token1.symbol} (${token1.decimals} decimals)\n`
-          );
+          if (token0 && token1) {
+            console.log(`📊 ${token0.symbol}/${token1.symbol} 池子`);
+          }
         }
-      }
-
-      if (parsed.eventName) {
-        events.push({ log, parsed });
+      } else if (POSITION_EVENT_TOPICS.includes(log.topics[0])) {
+        const parsed = decodeEventLog({
+          abi: POSITION_MANAGER_ABI,
+          data: log.data,
+          topics: log.topics,
+        });
+        events.position.push({ log, parsed });
       }
     } catch (err) {
-      // 非 Uniswap 日志，忽略
       continue;
     }
   }
 
   // 处理所有事件
   if (token0 && token1) {
-    let mintEventCount = 0;
-    for (const { log, parsed } of events) {
-      const format = (val, decimals) => Number(val) / 10 ** decimals;
+    const eventCounts = {
+      pool: {
+        Burn: 0,
+        Collect: 0,
+        Mint: 0,
+        Swap: 0,
+      },
+      position: {
+        IncreaseLiquidity: 0,
+        DecreaseLiquidity: 0,
+        Collect: 0,
+        Transfer: 0,
+      },
+    };
 
-      console.log(`\n[事件解析] ${parsed.eventName}:`);
-      console.log(`  Topics: ${JSON.stringify(log.topics)}`);
+    // 处理 Pool 事件
+    for (const { parsed } of events.pool) {
+      eventCounts.pool[parsed.eventName]++;
+
+      const format = (val, decimals) => {
+        const num = Number(val) / 10 ** decimals;
+        if (num > 1e9) return "异常数值";
+        return num.toFixed(6);
+      };
 
       switch (parsed.eventName) {
         case "Burn":
-          console.log(`\n🔥 Burn 事件:`);
+          console.log(`\n🔥 Pool Burn #${eventCounts.pool.Burn}:`);
+          console.log(`  owner: ${parsed.args.owner}`);
+          console.log(`  tickLower: ${parsed.args.tickLower}`);
+          console.log(`  tickUpper: ${parsed.args.tickUpper}`);
+          console.log(`  amount: ${parsed.args.amount.toString()}`);
+          console.log(
+            `  amount0: ${format(parsed.args.amount0, token0.decimals)} ${
+              token0.symbol
+            }`
+          );
+          console.log(
+            `  amount1: ${format(parsed.args.amount1, token1.decimals)} ${
+              token1.symbol
+            }`
+          );
+          break;
+
+        case "Collect":
+          console.log(`\n💰 Pool Collect #${eventCounts.pool.Collect}:`);
+          console.log(`  owner: ${parsed.args.owner}`);
+          console.log(`  recipient: ${parsed.args.recipient}`);
+          console.log(`  tickLower: ${parsed.args.tickLower}`);
+          console.log(`  tickUpper: ${parsed.args.tickUpper}`);
+          console.log(
+            `  amount0: ${format(parsed.args.amount0, token0.decimals)} ${
+              token0.symbol
+            }`
+          );
+          console.log(
+            `  amount1: ${format(parsed.args.amount1, token1.decimals)} ${
+              token1.symbol
+            }`
+          );
+          break;
+
+        case "Mint":
+          console.log(`\n➕ Pool Mint #${eventCounts.pool.Mint}:`);
+          console.log(`  owner: ${parsed.args.owner}`);
+          console.log(`  tickLower: ${parsed.args.tickLower}`);
+          console.log(`  tickUpper: ${parsed.args.tickUpper}`);
+          console.log(`  amount: ${parsed.args.amount.toString()}`);
+          console.log(
+            `  amount0: ${format(parsed.args.amount0, token0.decimals)} ${
+              token0.symbol
+            }`
+          );
+          console.log(
+            `  amount1: ${format(parsed.args.amount1, token1.decimals)} ${
+              token1.symbol
+            }`
+          );
+          break;
+
+        case "Swap":
+          console.log(`\n🔁 Pool Swap #${eventCounts.pool.Swap}:`);
+          const amount0Formatted = formatAmount(
+            parsed.args.amount0,
+            token0.decimals,
+            token0.symbol
+          );
+          const amount1Formatted = formatAmount(
+            parsed.args.amount1,
+            token1.decimals,
+            token1.symbol
+          );
+
+          if (amount0Formatted.isAbnormal || amount1Formatted.isAbnormal) {
+            console.log("  ⚠️ 异常交易金额:");
+            console.log(
+              `    amount0: ${amount0Formatted.raw} (${amount0Formatted.value} ${token0.symbol})`
+            );
+            console.log(
+              `    amount1: ${amount1Formatted.raw} (${amount1Formatted.value} ${token1.symbol})`
+            );
+            console.log(
+              `    当前价格: ${Number(parsed.args.sqrtPriceX96) / 2 ** 96}`
+            );
+            console.log(`    流动性: ${parsed.args.liquidity.toString()}`);
+            console.log(`    当前 tick: ${parsed.args.tick}`);
+          } else {
+            const amount0 = Number(parsed.args.amount0) / 10 ** token0.decimals;
+            const amount1 = Number(parsed.args.amount1) / 10 ** token1.decimals;
+            if (amount0 < 0) {
+              console.log(
+                `  用 ${Math.abs(amount0).toFixed(6)} ${
+                  token0.symbol
+                } 换取 ${amount1.toFixed(6)} ${token1.symbol}`
+              );
+            } else {
+              console.log(
+                `  用 ${Math.abs(amount1).toFixed(6)} ${
+                  token1.symbol
+                } 换取 ${amount0.toFixed(6)} ${token0.symbol}`
+              );
+            }
+          }
+          break;
+      }
+    }
+
+    // 处理 Position 事件
+    for (const { parsed } of events.position) {
+      eventCounts.position[parsed.eventName]++;
+
+      const format = (val, decimals) => {
+        const num = Number(val) / 10 ** decimals;
+        if (num > 1e9) return "异常数值";
+        return num.toFixed(6);
+      };
+
+      switch (parsed.eventName) {
+        case "IncreaseLiquidity":
+          console.log(
+            `\n📈 Position IncreaseLiquidity #${eventCounts.position.IncreaseLiquidity}:`
+          );
+          console.log(`  tokenId: ${parsed.args.tokenId}`);
+          console.log(`  liquidity: ${parsed.args.liquidity.toString()}`);
+          console.log(
+            `  amount0: ${format(parsed.args.amount0, token0.decimals)} ${
+              token0.symbol
+            }`
+          );
+          console.log(
+            `  amount1: ${format(parsed.args.amount1, token1.decimals)} ${
+              token1.symbol
+            }`
+          );
+          break;
+
+        case "DecreaseLiquidity":
+          console.log(
+            `\n📉 Position DecreaseLiquidity #${eventCounts.position.DecreaseLiquidity}:`
+          );
+          console.log(`  tokenId: ${parsed.args.tokenId}`);
           console.log(`  liquidity: ${parsed.args.liquidity.toString()}`);
           console.log(
             `  amount0: ${format(parsed.args.amount0, token0.decimals)} ${
@@ -264,7 +399,11 @@ async function analyzeTransaction(txHash) {
           break;
 
         case "Collect":
-          console.log(`\n💰 Collect 事件:`);
+          console.log(
+            `\n💰 Position Collect #${eventCounts.position.Collect}:`
+          );
+          console.log(`  tokenId: ${parsed.args.tokenId}`);
+          console.log(`  recipient: ${parsed.args.recipient}`);
           console.log(
             `  amount0: ${format(parsed.args.amount0, token0.decimals)} ${
               token0.symbol
@@ -277,47 +416,30 @@ async function analyzeTransaction(txHash) {
           );
           break;
 
-        case "Swap":
-          console.log(`\n🔁 Swap 事件:`);
-          const amount0 = format(parsed.args.amount0, token0.decimals);
-          const amount1 = format(parsed.args.amount1, token1.decimals);
-          if (amount0 < 0) {
-            console.log(
-              `  用 ${Math.abs(amount0)} ${token0.symbol} 换取 ${amount1} ${
-                token1.symbol
-              }`
-            );
-          } else {
-            console.log(
-              `  用 ${Math.abs(amount1)} ${token1.symbol} 换取 ${amount0} ${
-                token0.symbol
-              }`
-            );
-          }
-          break;
-
-        case "Mint":
-          mintEventCount++;
-          console.log(`\n➕ Mint 事件:`);
-          console.log(`  sender: ${parsed.args.sender}`);
-          console.log(`  owner: ${parsed.args.owner}`);
-          console.log(`  tickLower: ${parsed.args.tickLower}`);
-          console.log(`  tickUpper: ${parsed.args.tickUpper}`);
-          console.log(`  liquidity: ${parsed.args.amount.toString()}`);
+        case "Transfer":
           console.log(
-            `  amount0: ${format(parsed.args.amount0, token0.decimals)} ${
-              token0.symbol
-            }`
+            `\n📤 Position Transfer #${eventCounts.position.Transfer}:`
           );
-          console.log(
-            `  amount1: ${format(parsed.args.amount1, token1.decimals)} ${
-              token1.symbol
-            }`
-          );
+          console.log(`  tokenId: ${parsed.args.tokenId}`);
+          console.log(`  from: ${parsed.args.from}`);
+          console.log(`  to: ${parsed.args.to}`);
           break;
       }
     }
-    console.log(`\n[统计] 本次共解析出 Mint 事件数量: ${mintEventCount}`);
+
+    console.log("\n📊 事件统计:");
+    console.log("Pool 事件:");
+    Object.entries(eventCounts.pool).forEach(([event, count]) => {
+      if (count > 0) {
+        console.log(`  ${event}: ${count} 个`);
+      }
+    });
+    console.log("Position 事件:");
+    Object.entries(eventCounts.position).forEach(([event, count]) => {
+      if (count > 0) {
+        console.log(`  ${event}: ${count} 个`);
+      }
+    });
   } else {
     console.error("❌ 无法获取代币信息，跳过事件分析");
   }
@@ -330,4 +452,71 @@ const TX_HASH =
   "0xdcafedbc4517fed5409046081fb47fa3c30139e358585bddb8c86900a7f2ab99";
 
 console.log("📡 连接到 Base 网络...");
-analyzeTransaction(TX_HASH);
+analyzeTransaction(TX_HASH).then(() => {
+  analyzeAbnormalSwap(TX_HASH);
+});
+
+// 添加新的格式化函数
+const formatAmount = (amount, decimals, symbol) => {
+  const num = Number(amount) / 10 ** decimals;
+  if (num > 1e9) {
+    return {
+      value: "异常数值",
+      raw: amount.toString(),
+      isAbnormal: true,
+    };
+  }
+  return {
+    value: num.toFixed(6),
+    raw: amount.toString(),
+    isAbnormal: false,
+  };
+};
+
+// 在文件末尾添加新的分析函数
+async function analyzeAbnormalSwap(txHash) {
+  console.log("\n🔍 分析异常交易...");
+  const receipt = await withRetry(() =>
+    getCurrentClient().getTransactionReceipt({ hash: txHash })
+  );
+
+  // 获取交易详情
+  const tx = await withRetry(() =>
+    getCurrentClient().getTransaction({ hash: txHash })
+  );
+
+  console.log("\n📊 交易详情:");
+  console.log(`  发送方: ${tx.from}`);
+  console.log(`  接收方: ${tx.to}`);
+  console.log(`  Gas 价格: ${tx.gasPrice}`);
+  console.log(`  Gas 限制: ${tx.gas}`);
+  console.log(`  交易值: ${tx.value}`);
+
+  // 分析所有 Swap 事件
+  let swapCount = 0;
+  for (const log of receipt.logs) {
+    if (
+      log.topics[0] ===
+      "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
+    ) {
+      swapCount++;
+      try {
+        const parsed = decodeEventLog({
+          abi: UNISWAP_V3_POOL_ABI,
+          data: log.data,
+          topics: log.topics,
+        });
+
+        console.log(`\n🔄 Swap #${swapCount}:`);
+        console.log(`  池子地址: ${log.address}`);
+        console.log(`  amount0: ${parsed.args.amount0.toString()}`);
+        console.log(`  amount1: ${parsed.args.amount1.toString()}`);
+        console.log(`  价格: ${Number(parsed.args.sqrtPriceX96) / 2 ** 96}`);
+        console.log(`  流动性: ${parsed.args.liquidity.toString()}`);
+        console.log(`  tick: ${parsed.args.tick}`);
+      } catch (err) {
+        console.log(`  解析失败: ${err.message}`);
+      }
+    }
+  }
+}

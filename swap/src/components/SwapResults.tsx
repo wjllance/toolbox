@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/card";
 import { formatAddress, formatTimestamp, formatEther } from "@/lib/utils";
 import { ExternalLink, Clock, Hash, DollarSign, BarChart3 } from "lucide-react";
+import { SUPPORTED_NETWORKS } from "@/lib/constants";
 
 interface SwapResultsProps {
   analysis: TransactionAnalysis;
@@ -90,7 +91,9 @@ export function SwapResults({ analysis }: SwapResultsProps) {
                   {formatAddress(analysis.hash, 6)}
                 </p>
                 <a
-                  href={`https://etherscan.io/tx/${analysis.hash}`}
+                  href={`${analysis.network === "BASE" 
+                    ? SUPPORTED_NETWORKS.BASE.blockExplorer 
+                    : SUPPORTED_NETWORKS.ETHEREUM.blockExplorer}/tx/${analysis.hash}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-blue-500 hover:text-blue-700"

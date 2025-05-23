@@ -23,13 +23,16 @@ import { analyzeTransaction } from "@/lib/web3";
 import { SwapResults } from "./SwapResults";
 import { Search, Loader2 } from "lucide-react";
 import { SUPPORTED_NETWORKS } from "@/lib/constants";
+import { useNetworkStore } from "@/lib/store";
 
 export function SwapAnalyzer() {
   const [txHash, setTxHash] = useState("");
   const [analysis, setAnalysis] = useState<TransactionAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [network, setNetwork] = useState<"ETHEREUM" | "BASE">("ETHEREUM");
+  
+  // Use Zustand store for network state instead of local state
+  const { network, setNetwork } = useNetworkStore();
 
   const handleAnalyze = async () => {
     if (!txHash.trim()) {

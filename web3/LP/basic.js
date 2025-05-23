@@ -9,7 +9,6 @@ console.log("🚀 初始化客户端...");
 // 添加更多 RPC 节点
 const RPC_URLS = [
   process.env.RPC_URL,
-  "https://mainnet.base.org",
   "https://base.blockpi.network/v1/rpc/public",
   "https://base.meowrpc.com",
   "https://base.publicnode.com",
@@ -71,6 +70,11 @@ const UNISWAP_V4_POOL_ABI = parseAbi([
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)",
 ]);
 
+// 添加 PancakeSwap V3 Pool ABI
+const PANCAKESWAP_V3_POOL_ABI = parseAbi([
+  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
+]);
+
 // =============== 限流和缓存 ===============
 const limiter = new Bottleneck({
   maxConcurrent: 2,
@@ -107,6 +111,19 @@ const KNOWN_POOLS = {
       address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
       symbol: "USDT",
       decimals: 6,
+    },
+  },
+  // 添加 PancakeSwap V3 池子
+  "0x3e66e55e97ce60096f74b7c475e8249f2d31a9fb": {
+    token0: {
+      address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      symbol: "USDC",
+      decimals: 6,
+    },
+    token1: {
+      address: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+      symbol: "cbBTC",
+      decimals: 8,
     },
   },
 };
@@ -575,6 +592,8 @@ const TX_HASH =
 console.log("📡 连接到 Base 网络...");
 analyzeTransaction(TX_HASH).then(() => {
   analyzeAbnormalSwap(TX_HASH);
+  saveTransactionLogs(TX_HASH);
+  analyzeSwapsByTransfers(TX_HASH);
 });
 
 // 添加新的格式化函数
@@ -829,10 +848,10 @@ async function analyzeAbnormalSwap(txHash) {
       log.topics[0] ===
         "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822" || // V2 Swap
       log.topics[0] ===
-        "0x19b47279256b2a23a1665c810c8d55a1758950e09377acb841d0a21f2e2f0f3d"
+        "0x19b47279256b2a23a1665c810c8d55a1758950e09377acb841d0a21f2e2f0f3d" || // V4 Swap
+      log.topics[0] ===
+        "0x19b47279256b2a23a1665c810c8d55a1758950e09377acb841d0a21f2e2f0f3d" // PancakeSwap V3 Swap
     ) {
-      // V4 Swap
-
       console.log(`\n📝 发现 Swap 事件 #${swapCount + 1}:`);
       console.log(`  Topic: ${log.topics[0]}`);
       console.log(`  合约地址: ${log.address}`);
@@ -863,13 +882,31 @@ async function analyzeAbnormalSwap(txHash) {
             topics: log.topics,
           });
           version = "V4";
-        } else {
-          parsed = decodeEventLog({
-            abi: UNISWAP_V3_POOL_ABI,
-            data: log.data,
-            topics: log.topics,
-          });
-          version = "V3";
+        } else if (
+          log.topics[0] ===
+          "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
+        ) {
+          // 尝试使用 Uniswap V3 和 PancakeSwap V3 的 ABI 解析
+          try {
+            parsed = decodeEventLog({
+              abi: UNISWAP_V3_POOL_ABI,
+              data: log.data,
+              topics: log.topics,
+            });
+            version = "V3";
+          } catch (error) {
+            try {
+              parsed = decodeEventLog({
+                abi: PANCAKESWAP_V3_POOL_ABI,
+                data: log.data,
+                topics: log.topics,
+              });
+              version = "PancakeV3";
+            } catch (error) {
+              console.error("❌ 无法解析 Swap 事件:", error);
+              continue;
+            }
+          }
         }
 
         // 获取池子信息
@@ -970,48 +1007,53 @@ async function analyzeAbnormalSwap(txHash) {
       const event = swapEvents[i];
       const { poolInfo, parsed } = event;
 
-      if (poolInfo) {
-        const amount0 =
-          Number(parsed.args.amount0) / 10 ** poolInfo.token0.decimals;
-        const amount1 =
-          Number(parsed.args.amount1) / 10 ** poolInfo.token1.decimals;
-
-        if (i === 0) {
-          // 第一个 Swap 确定输入代币
-          if (amount0 < 0) {
+      if (i === 0) {
+        // 第一个 Swap 确定输入代币
+        if (poolInfo) {
+          if (poolInfo.token0.address === parsed.args.recipient) {
             inputToken = poolInfo.token0;
-            totalInput = Math.abs(amount0);
-          } else {
+            totalInput =
+              Math.abs(Number(parsed.args.amount0)) /
+              10 ** poolInfo.token0.decimals;
+          } else if (poolInfo.token1.address === parsed.args.recipient) {
             inputToken = poolInfo.token1;
-            totalInput = Math.abs(amount1);
+            totalInput =
+              Math.abs(Number(parsed.args.amount1)) /
+              10 ** poolInfo.token1.decimals;
           }
         }
-
-        if (i === swapEvents.length - 1) {
-          // 最后一个 Swap 确定输出代币
-          if (amount0 > 0) {
-            outputToken = poolInfo.token0;
-            totalOutput = amount0;
-          } else {
-            outputToken = poolInfo.token1;
-            totalOutput = amount1;
-          }
-        }
-
-        console.log(
-          `  ${i + 1}. ${poolInfo.token0.symbol}/${poolInfo.token1.symbol} 池`
-        );
-        console.log(
-          `     输入: ${Math.abs(amount0 < 0 ? amount0 : amount1).toFixed(6)} ${
-            amount0 < 0 ? poolInfo.token0.symbol : poolInfo.token1.symbol
-          }`
-        );
-        console.log(
-          `     输出: ${Math.abs(amount0 > 0 ? amount0 : amount1).toFixed(6)} ${
-            amount0 > 0 ? poolInfo.token0.symbol : poolInfo.token1.symbol
-          }`
-        );
       }
+
+      if (i === swapEvents.length - 1) {
+        // 最后一个 Swap 确定输出代币
+        if (poolInfo) {
+          if (poolInfo.token0.address === parsed.args.recipient) {
+            outputToken = poolInfo.token0;
+            totalOutput =
+              Math.abs(Number(parsed.args.amount0)) /
+              10 ** poolInfo.token0.decimals;
+          } else if (poolInfo.token1.address === parsed.args.recipient) {
+            outputToken = poolInfo.token1;
+            totalOutput =
+              Math.abs(Number(parsed.args.amount1)) /
+              10 ** poolInfo.token1.decimals;
+          }
+        }
+      }
+
+      console.log(
+        `  ${i + 1}. ${poolInfo.token0.symbol}/${poolInfo.token1.symbol} 池`
+      );
+      console.log(
+        `     输入: ${
+          Math.abs(Number(parsed.args.amount0)) / 10 ** poolInfo.token0.decimals
+        } ${poolInfo.token0.symbol}`
+      );
+      console.log(
+        `     输出: ${
+          Math.abs(Number(parsed.args.amount1)) / 10 ** poolInfo.token1.decimals
+        } ${poolInfo.token1.symbol}`
+      );
     }
 
     if (inputToken && outputToken) {
@@ -1028,4 +1070,368 @@ async function analyzeAbnormalSwap(txHash) {
       }
     }
   }
+}
+
+// 添加格式化事件日志的函数
+async function saveTransactionLogs(txHash) {
+  console.log("\n📝 开始保存交易日志...");
+  const receipt = await withRetry(() =>
+    getCurrentClient().getTransactionReceipt({ hash: txHash })
+  );
+
+  const logs = receipt.logs.map((log, index) => {
+    return {
+      index,
+      address: log.address,
+      topics: log.topics,
+      data: log.data,
+      blockNumber: receipt.blockNumber.toString(),
+      transactionHash: txHash,
+    };
+  });
+
+  // 自定义 JSON 序列化，处理 BigInt
+  const formattedLogs = JSON.stringify(
+    logs,
+    (key, value) => {
+      if (typeof value === "bigint") {
+        return value.toString();
+      }
+      return value;
+    },
+    2
+  );
+
+  const fs = await import("fs/promises");
+  const filename = `tx_logs_${txHash.slice(2, 10)}.json`;
+
+  try {
+    await fs.writeFile(filename, formattedLogs);
+    console.log(`✅ 交易日志已保存到文件: ${filename}`);
+  } catch (error) {
+    console.error(`❌ 保存日志失败:`, error);
+  }
+}
+
+// 优化 analyzeSwapsByTransfers 函数
+async function analyzeSwapsByTransfers(txHash) {
+  console.log("\n🔍 基于Transfer事件分析Swap交易...");
+  const receipt = await withRetry(() =>
+    getCurrentClient().getTransactionReceipt({ hash: txHash })
+  );
+
+  // 收集所有Swap事件和Transfer事件
+  const swapEvents = [];
+  const transferEvents = [];
+
+  // ERC20 Transfer事件的topic
+  const TRANSFER_TOPIC =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+  // Swap事件的topics
+  const SWAP_TOPICS = [
+    "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67", // V3 Swap
+    "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822", // V2 Swap
+    "0x19b47279256b2a23a1665c810c8d55a1758950e09377acb841d0a21f2e2f0f3d", // V4 Swap
+  ];
+
+  console.log(`📊 分析 ${receipt.logs.length} 个日志事件...`);
+
+  // 第一步：收集所有相关事件
+  for (let i = 0; i < receipt.logs.length; i++) {
+    const log = receipt.logs[i];
+
+    // 收集Transfer事件
+    if (log.topics[0] === TRANSFER_TOPIC && log.topics.length >= 3) {
+      try {
+        // 处理普通的ERC20 Transfer (有data的)
+        if (log.data && log.data !== "0x" && log.data.length > 2) {
+          const transferEvent = {
+            logIndex: i,
+            tokenAddress: log.address,
+            from: `0x${log.topics[1].slice(26)}`,
+            to: `0x${log.topics[2].slice(26)}`,
+            amount: BigInt(log.data),
+            log: log,
+          };
+          transferEvents.push(transferEvent);
+        }
+        // 处理NFT Transfer (amount在topics中)
+        else if (log.topics.length === 4) {
+          const transferEvent = {
+            logIndex: i,
+            tokenAddress: log.address,
+            from: `0x${log.topics[1].slice(26)}`,
+            to: `0x${log.topics[2].slice(26)}`,
+            tokenId: BigInt(log.topics[3]),
+            isNFT: true,
+            log: log,
+          };
+          transferEvents.push(transferEvent);
+        }
+      } catch (error) {
+        console.log(`  ⚠️ 解析Transfer事件失败 #${i}: ${error.message}`);
+      }
+    }
+
+    // 收集Swap事件
+    if (SWAP_TOPICS.includes(log.topics[0])) {
+      try {
+        let parsed;
+        let version;
+
+        if (
+          log.topics[0] ===
+          "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+        ) {
+          parsed = decodeEventLog({
+            abi: UNISWAP_V2_PAIR_ABI,
+            data: log.data,
+            topics: log.topics,
+          });
+          version = "V2";
+        } else if (
+          log.topics[0] ===
+          "0x19b47279256b2a23a1665c810c8d55a1758950e09377acb841d0a21f2e2f0f3d"
+        ) {
+          parsed = decodeEventLog({
+            abi: UNISWAP_V4_POOL_ABI,
+            data: log.data,
+            topics: log.topics,
+          });
+          version = "V4";
+        } else {
+          // V3 Swap
+          parsed = decodeEventLog({
+            abi: UNISWAP_V3_POOL_ABI,
+            data: log.data,
+            topics: log.topics,
+          });
+          version = "V3";
+        }
+
+        const swapEvent = {
+          logIndex: i,
+          poolAddress: log.address,
+          version: version,
+          parsed: parsed,
+          log: log,
+        };
+        swapEvents.push(swapEvent);
+      } catch (error) {
+        console.log(`  ⚠️ 解析Swap事件失败 #${i}: ${error.message}`);
+      }
+    }
+  }
+
+  // 过滤掉NFT Transfer，只保留ERC20 Transfer
+  const erc20Transfers = transferEvents.filter((t) => !t.isNFT);
+  console.log(
+    `✅ 找到 ${swapEvents.length} 个Swap事件，${erc20Transfers.length} 个ERC20 Transfer事件`
+  );
+
+  // 第二步：构建完整的交易流程分析
+  console.log("\n📈 交易流程分析:");
+
+  // 获取所有涉及的token信息
+  const allTokenAddresses = [
+    ...new Set(erc20Transfers.map((t) => t.tokenAddress)),
+  ];
+  const tokenInfoMap = new Map();
+
+  console.log(`📝 获取 ${allTokenAddresses.length} 个代币信息...`);
+  for (const tokenAddress of allTokenAddresses) {
+    const tokenInfo = await getTokenInfo(tokenAddress);
+    if (tokenInfo) {
+      tokenInfoMap.set(tokenAddress, tokenInfo);
+      console.log(`  ✅ ${tokenInfo.symbol} (${tokenAddress})`);
+    } else {
+      console.log(`  ❌ 未知代币 (${tokenAddress})`);
+    }
+  }
+
+  // 分析每个Swap事件的详细流程
+  const swapAnalysis = [];
+
+  for (const swapEvent of swapEvents) {
+    console.log(
+      `\n🔄 详细分析Swap事件 #${swapEvent.logIndex} (${swapEvent.version}):`
+    );
+    console.log(`  池子地址: ${swapEvent.poolAddress}`);
+
+    // 查找在此Swap前后的Transfer事件
+    const beforeTransfers = erc20Transfers.filter(
+      (t) =>
+        t.logIndex >= swapEvent.logIndex - 10 && t.logIndex < swapEvent.logIndex
+    );
+    const afterTransfers = erc20Transfers.filter(
+      (t) =>
+        t.logIndex > swapEvent.logIndex && t.logIndex <= swapEvent.logIndex + 10
+    );
+
+    console.log(
+      `  前置Transfer: ${beforeTransfers.length} 个，后置Transfer: ${afterTransfers.length} 个`
+    );
+
+    // 分析输入（到池子的Transfer）
+    const inputTransfers = [...beforeTransfers, ...afterTransfers].filter(
+      (t) => t.to.toLowerCase() === swapEvent.poolAddress.toLowerCase()
+    );
+
+    // 分析输出（从池子的Transfer）
+    const outputTransfers = [...beforeTransfers, ...afterTransfers].filter(
+      (t) => t.from.toLowerCase() === swapEvent.poolAddress.toLowerCase()
+    );
+
+    console.log(`  🔍 输入流水 (${inputTransfers.length} 个):`);
+    inputTransfers.forEach((transfer) => {
+      const tokenInfo = tokenInfoMap.get(transfer.tokenAddress);
+      if (tokenInfo) {
+        const amount = Number(transfer.amount) / 10 ** tokenInfo.decimals;
+        console.log(
+          `    📥 ${amount.toFixed(6)} ${
+            tokenInfo.symbol
+          } (从 ${transfer.from.slice(0, 10)}... 到池子)`
+        );
+      }
+    });
+
+    console.log(`  🔍 输出流水 (${outputTransfers.length} 个):`);
+    outputTransfers.forEach((transfer) => {
+      const tokenInfo = tokenInfoMap.get(transfer.tokenAddress);
+      if (tokenInfo) {
+        const amount = Number(transfer.amount) / 10 ** tokenInfo.decimals;
+        console.log(
+          `    📤 ${amount.toFixed(6)} ${
+            tokenInfo.symbol
+          } (从池子到 ${transfer.to.slice(0, 10)}...)`
+        );
+      }
+    });
+
+    // 计算净交易量
+    if (inputTransfers.length > 0 && outputTransfers.length > 0) {
+      const input = inputTransfers[0];
+      const output = outputTransfers[0];
+      const inputToken = tokenInfoMap.get(input.tokenAddress);
+      const outputToken = tokenInfoMap.get(output.tokenAddress);
+
+      if (inputToken && outputToken) {
+        const inputAmount = Number(input.amount) / 10 ** inputToken.decimals;
+        const outputAmount = Number(output.amount) / 10 ** outputToken.decimals;
+        const rate = outputAmount / inputAmount;
+
+        console.log(
+          `  💱 交易摘要: ${inputAmount.toFixed(6)} ${
+            inputToken.symbol
+          } -> ${outputAmount.toFixed(6)} ${outputToken.symbol}`
+        );
+        console.log(
+          `  📊 汇率: 1 ${inputToken.symbol} = ${rate.toFixed(6)} ${
+            outputToken.symbol
+          }`
+        );
+      }
+    }
+
+    swapAnalysis.push({
+      swapEvent,
+      inputTransfers: inputTransfers.map((t) => ({
+        ...t,
+        tokenInfo: tokenInfoMap.get(t.tokenAddress),
+      })),
+      outputTransfers: outputTransfers.map((t) => ({
+        ...t,
+        tokenInfo: tokenInfoMap.get(t.tokenAddress),
+      })),
+    });
+  }
+
+  // 第三步：分析整体交易路径
+  console.log("\n🛣️ 整体交易路径重构:");
+
+  if (swapAnalysis.length > 1) {
+    console.log("  📍 多池路由交易路径:");
+
+    let currentToken = null;
+    let totalValue = 0;
+
+    for (let i = 0; i < swapAnalysis.length; i++) {
+      const analysis = swapAnalysis[i];
+
+      if (
+        analysis.inputTransfers.length > 0 &&
+        analysis.outputTransfers.length > 0
+      ) {
+        const input = analysis.inputTransfers[0];
+        const output = analysis.outputTransfers[0];
+
+        if (input.tokenInfo && output.tokenInfo) {
+          const inputAmount =
+            Number(input.amount) / 10 ** input.tokenInfo.decimals;
+          const outputAmount =
+            Number(output.amount) / 10 ** output.tokenInfo.decimals;
+
+          console.log(
+            `  ${i + 1}. ${input.tokenInfo.symbol} -> ${
+              output.tokenInfo.symbol
+            }`
+          );
+          console.log(
+            `     金额: ${inputAmount.toFixed(6)} -> ${outputAmount.toFixed(6)}`
+          );
+          console.log(
+            `     池子: ${analysis.swapEvent.poolAddress.slice(0, 8)}...`
+          );
+
+          if (i === 0) {
+            currentToken = input.tokenInfo;
+            totalValue = inputAmount;
+          }
+          if (i === swapAnalysis.length - 1) {
+            const finalRate = outputAmount / totalValue;
+            console.log(`\n  💰 最终结果:`);
+            console.log(
+              `    总投入: ${totalValue.toFixed(6)} ${currentToken.symbol}`
+            );
+            console.log(
+              `    总产出: ${outputAmount.toFixed(6)} ${
+                output.tokenInfo.symbol
+              }`
+            );
+            console.log(
+              `    整体汇率: 1 ${currentToken.symbol} = ${finalRate.toFixed(
+                6
+              )} ${output.tokenInfo.symbol}`
+            );
+          }
+        }
+      }
+    }
+  } else if (swapAnalysis.length === 1) {
+    console.log("  📍 单池直接交易");
+    const analysis = swapAnalysis[0];
+    if (
+      analysis.inputTransfers.length > 0 &&
+      analysis.outputTransfers.length > 0
+    ) {
+      const input = analysis.inputTransfers[0];
+      const output = analysis.outputTransfers[0];
+
+      if (input.tokenInfo && output.tokenInfo) {
+        const inputAmount =
+          Number(input.amount) / 10 ** input.tokenInfo.decimals;
+        const outputAmount =
+          Number(output.amount) / 10 ** output.tokenInfo.decimals;
+
+        console.log(
+          `    ${inputAmount.toFixed(6)} ${
+            input.tokenInfo.symbol
+          } -> ${outputAmount.toFixed(6)} ${output.tokenInfo.symbol}`
+        );
+      }
+    }
+  }
+
+  return swapAnalysis;
 }

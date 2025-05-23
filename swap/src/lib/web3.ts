@@ -1,10 +1,14 @@
 import { ethers } from "ethers";
 import { TransactionAnalysis, SwapEvent, Token } from "@/types/swap";
-import { DEX_PROTOCOLS, RPC_URLS } from "./constants";
+import { DEX_PROTOCOLS, RPC_URLS, SUPPORTED_NETWORKS } from "./constants";
+
+// 定义协议键的类型
+// 这解决了TypeScript不能正确识别 DEX_PROTOCOLS 对象的键的类型问题
+type ProtocolKey = keyof typeof DEX_PROTOCOLS;
 
 // 创建provider
-export function createProvider() {
-  const rpcUrl = RPC_URLS.ETHEREUM_MAINNET;
+export function createProvider(network: "ETHEREUM" | "BASE" = "ETHEREUM") {
+  const rpcUrl = network === "ETHEREUM" ? RPC_URLS.ETHEREUM_MAINNET : RPC_URLS.BASE_MAINNET;
   return new ethers.JsonRpcProvider(rpcUrl);
 }
 
@@ -116,8 +120,8 @@ function parseUniswapV2SwapEvent(
 }
 
 // 解析交易中的swap事件
-export async function parseSwapEvents(txHash: string): Promise<SwapEvent[]> {
-  const provider = createProvider();
+export async function parseSwapEvents(txHash: string, network: "ETHEREUM" | "BASE" = "ETHEREUM"): Promise<SwapEvent[]> {
+  const provider = createProvider(network);
   const swapEvents: SwapEvent[] = [];
 
   try {
@@ -126,28 +130,42 @@ export async function parseSwapEvents(txHash: string): Promise<SwapEvent[]> {
       throw new Error("Transaction not found");
     }
 
+    // 创建一个带类型的协议映射，用于过滤网络特定的协议
+    const networkProtocols = Object.entries(DEX_PROTOCOLS).filter(([_, protocol]) => {
+      const protocolObj = protocol as any;
+      const protocolNetwork = (protocolObj.network || "ethereum").toLowerCase();
+      const currentNetworkStr = network === "ETHEREUM" ? "ethereum" : "base";
+      return protocolNetwork === currentNetworkStr;
+    });
+
     // 遍历所有logs，寻找swap相关的事件
     for (const log of receipt.logs) {
-      // 检查是否是已知的swap事件签名
-      for (const [protocolKey, protocol] of Object.entries(DEX_PROTOCOLS)) {
+      for (const [protocolKey, protocol] of networkProtocols) {
         if (protocol.swapSignatures.includes(log.topics[0])) {
           let swapEvent: SwapEvent | null = null;
 
-          switch (protocolKey) {
-            case "UNISWAP_V2":
-            case "SUSHISWAP":
-              swapEvent = parseUniswapV2SwapEvent(
-                log,
-                txHash,
-                receipt.blockNumber
-              );
-              break;
-            // 这里可以添加其他协议的解析逻辑
-            default:
-              console.log(`Parser for ${protocol.name} not implemented yet`);
+          // 根据协议类型使用不同的解析器
+          if (["UNISWAP_V2", "SUSHISWAP"].includes(protocolKey)) {
+            swapEvent = parseUniswapV2SwapEvent(
+              log,
+              txHash,
+              receipt.blockNumber
+            );
+          } else if (["AERODROME", "BASESWAP", "SUSHI_BASE"].includes(protocolKey)) {
+            // Base 网络上的 DEX 协议大多兼容 Uniswap V2 的事件格式
+            swapEvent = parseUniswapV2SwapEvent(
+              log,
+              txHash,
+              receipt.blockNumber
+            );
+          } else {
+            console.log(`Parser for ${protocol.name} not implemented yet`);
           }
 
           if (swapEvent) {
+            // 添加协议信息
+            swapEvent.protocol = protocol.name;
+            swapEvent.version = protocol.version || "1";
             swapEvents.push(swapEvent);
           }
         }
@@ -163,9 +181,11 @@ export async function parseSwapEvents(txHash: string): Promise<SwapEvent[]> {
 
 // 分析完整的交易
 export async function analyzeTransaction(
-  txHash: string
+  txHash: string,
+  network: "ETHEREUM" | "BASE" = "ETHEREUM"
 ): Promise<TransactionAnalysis> {
-  const provider = createProvider();
+  const provider = createProvider(network);
+  const networkName = SUPPORTED_NETWORKS[network].name;
 
   try {
     const [tx, receipt] = await Promise.all([
@@ -174,11 +194,11 @@ export async function analyzeTransaction(
     ]);
 
     if (!tx || !receipt) {
-      throw new Error("Transaction not found");
+      throw new Error(`Transaction not found on ${networkName} network`);
     }
 
     const block = await provider.getBlock(receipt.blockNumber);
-    const swaps = await parseSwapEvents(txHash);
+    const swaps = await parseSwapEvents(txHash, network);
 
     // 获取使用的协议列表
     const protocolsUsed = [...new Set(swaps.map((swap) => swap.protocol))];
@@ -196,9 +216,10 @@ export async function analyzeTransaction(
       swaps,
       totalSwaps: swaps.length,
       protocolsUsed,
+      network: network,
     };
   } catch (error) {
-    console.error("Failed to analyze transaction:", error);
+    console.error(`Failed to analyze transaction on ${networkName}:`, error);
     throw error;
   }
 }

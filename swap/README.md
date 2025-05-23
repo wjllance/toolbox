@@ -1,10 +1,10 @@
 # ETH Swap Analyzer
 
-一个基于 NextJS 的以太坊交易分析工具，能够根据交易 hash 解析出其中所有的 swap 交易。
+一个基于 NextJS 的以太坊和 Base 交易分析工具，能够根据交易 hash 解析出其中所有的 swap 交易。
 
 ## 🚀 功能特性
 
-- **多协议支持**: 支持主流 DEX 协议（Uniswap V2/V3, SushiSwap, 1inch, Curve 等）
+- **多协议支持**: 支持主流 DEX 协议（Uniswap V2/V3, SushiSwap, 1inch, Curve, Aerodrome 等）
 - **实时解析**: 输入交易 hash 即可实时分析
 - **详细信息**: 展示每个 swap 的详细信息，包括代币、数量、发送者等
 - **统计概览**: 提供交易统计信息和 Gas 费用分析
@@ -55,6 +55,8 @@ src/
 - **SushiSwap**: 兼容 Uniswap V2 格式
 - **1inch**: 支持聚合器交易
 - **Curve**: 支持稳定币优化交易
+- **Aerodrome**: 支持 Base 上的主要 DEX 协议
+- **BaseSwap**: 支持 Base 链上的原生 DEX
 
 #### 3. 数据处理
 
@@ -77,7 +79,7 @@ cd web3/swap
 
 ```bash
 cd web3/swap
-npm install
+yarn install
 ```
 
 #### 2. 配置环境变量
@@ -94,19 +96,22 @@ cp env.example .env.local
 NEXT_PUBLIC_ETHEREUM_RPC_URL=https://rpc.ankr.com/eth
 # 或使用 Alchemy/Infura (推荐)
 NEXT_PUBLIC_ALCHEMY_URL=https://eth-mainnet.alchemyapi.io/v2/your-api-key
+
+# Base 网络 RPC URL
+NEXT_PUBLIC_BASE_RPC_URL=https://mainnet.base.org
 ```
 
 #### 3. 启动开发服务器
 
 ```bash
-npm run dev
+yarn dev
 ```
 
 访问 http://localhost:3000 开始使用。
 
 ## 📖 使用指南
 
-1. **输入交易 Hash**: 在输入框中粘贴以太坊交易 hash
+1. **输入交易 Hash**: 在输入框中粘贴以太坊或 Base 交易 hash
 2. **点击分析**: 点击"分析"按钮开始解析
 3. **查看结果**: 查看交易概览、统计信息和详细的 swap 操作
 
@@ -114,8 +119,8 @@ npm run dev
 
 可以使用以下类型的交易进行测试：
 
-- Uniswap V2 swap 交易
-- Uniswap V3 swap 交易
+- Uniswap V2/V3 swap 交易
+- Base 上的 Aerodrome/BaseSwap 交易
 - 包含多个 swap 的复杂交易
 - 聚合器交易（如 1inch）
 
@@ -162,6 +167,7 @@ switch (protocolKey) {
 - **MEV 检测**: 分析套利和 MEV 交易
 - **Gas 优化**: 分析 Gas 使用效率
 - **历史对比**: 添加历史交易对比功能
+- **多链支持**: 扩展支持更多区块链（Arbitrum、Optimism 等）
 
 ## 🛠️ 技术细节
 

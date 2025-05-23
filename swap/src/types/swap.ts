@@ -36,15 +36,17 @@ export interface TransactionAnalysis {
   swaps: SwapEvent[];
   totalSwaps: number;
   protocolsUsed: string[];
+  network?: "ETHEREUM" | "BASE";
 }
 
 export interface DEXProtocol {
   name: string;
   version?: string;
+  network?: "ethereum" | "base";
   routerAddress: string;
   factoryAddress?: string;
   swapSignatures: string[];
-  parseSwap: (log: any) => SwapEvent | null;
+  parseSwap?: (log: any) => SwapEvent | null;
 }
 
 export type SupportedProtocol =
